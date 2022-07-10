@@ -218,165 +218,165 @@ impl Client {
 #[cfg(test)]
 mod tests {
 
-    use google_cloud_googleapis::pubsub::v1::PubsubMessage;
-    use serial_test::serial;
-    use std::thread;
-    use std::time::Duration;
+    // use google_cloud_googleapis::pubsub::v1::PubsubMessage;
+    // use serial_test::serial;
+    // use std::thread;
+    // use std::time::Duration;
+    //
+    // use crate::client::Client;
+    // use google_cloud_gax::cancel::CancellationToken;
+    // use uuid::Uuid;
+    //
+    // use crate::subscriber::SubscriberConfig;
+    // use crate::subscription::{ReceiveConfig, SubscriptionConfig};
+    //
+    // #[ctor::ctor]
+    // fn init() {
+    //     let _ = tracing_subscriber::fmt().try_init();
+    // }
+    //
+    // fn create_message(data: &[u8], ordering_key: &str) -> PubsubMessage {
+    //     PubsubMessage {
+    //         data: data.to_vec(),
+    //         ordering_key: ordering_key.to_string(),
+    //         ..Default::default()
+    //     }
+    // }
+    //
+    // async fn create_client() -> Client {
+    //     std::env::set_var("PUBSUB_EMULATOR_HOST", "localhost:8681");
+    //     Client::default().await.unwrap()
+    // }
 
-    use crate::client::Client;
-    use google_cloud_gax::cancel::CancellationToken;
-    use uuid::Uuid;
+    // async fn do_publish_and_subscribe(ordering_key: &str) -> Result<(), anyhow::Error> {
+    //     let client = create_client().await;
+    //
+    //     let order = !ordering_key.is_empty();
+    //     // create
+    //     let uuid = Uuid::new_v4().to_hyphenated().to_string();
+    //     let topic_id = &format!("t{}", &uuid);
+    //     let subscription_id = &format!("s{}", &uuid);
+    //     let ctx = Some(CancellationToken::new());
+    //     let topic = client
+    //         .create_topic(topic_id.as_str(), None, ctx.clone(), None)
+    //         .await
+    //         .unwrap();
+    //     let publisher = topic.new_publisher(None);
+    //     let config = SubscriptionConfig {
+    //         enable_message_ordering: !ordering_key.is_empty(),
+    //         ..Default::default()
+    //     };
+    //     let subscription = client
+    //         .create_subscription(subscription_id.as_str(), topic_id.as_str(), config, ctx.clone(), None)
+    //         .await
+    //         .unwrap();
+    //
+    //     let cancellation_token = CancellationToken::new();
+    //     //subscribe
+    //     let config = ReceiveConfig {
+    //         worker_count: 2,
+    //         subscriber_config: SubscriberConfig {
+    //             ping_interval: Duration::from_secs(1),
+    //             ..Default::default()
+    //         },
+    //     };
+    //     let cancel_receiver = cancellation_token.clone();
+    //     let (s, mut r) = tokio::sync::mpsc::channel(100);
+    //     let handle = tokio::spawn(async move {
+    //         let _ = subscription
+    //             .receive(
+    //                 move |v, _ctx| {
+    //                     let s2 = s.clone();
+    //                     async move {
+    //                         let _ = v.ack().await;
+    //                         let data = std::str::from_utf8(&v.message.data).unwrap().to_string();
+    //                         tracing::info!(
+    //                             "tid={:?} id={} data={}",
+    //                             thread::current().id(),
+    //                             v.message.message_id,
+    //                             data
+    //                         );
+    //                         let _ = s2.send(data).await;
+    //                     }
+    //                 },
+    //                 cancel_receiver,
+    //                 Some(config),
+    //             )
+    //             .await;
+    //     });
+    //
+    //     //publish
+    //     let mut awaiters = Vec::with_capacity(100);
+    //     for v in 0..100 {
+    //         let message = create_message(format!("abc_{}", v).as_bytes(), ordering_key);
+    //         awaiters.push(publisher.publish(message).await);
+    //     }
+    //     let ctx = CancellationToken::new();
+    //     for v in awaiters {
+    //         tracing::info!("sent message_id = {}", v.get(Some(ctx.clone())).await.unwrap());
+    //     }
+    //
+    //     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    //     cancellation_token.cancel();
+    //     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    //
+    //     let mut count = 0;
+    //     while let Some(data) = r.recv().await {
+    //         tracing::debug!("{}", data);
+    //         if order {
+    //             assert_eq!(format!("abc_{}", count), data);
+    //         }
+    //         count += 1;
+    //     }
+    //     assert_eq!(count, 100);
+    //     let _ = handle.await;
+    //
+    //     let mut publisher = publisher;
+    //     publisher.shutdown().await;
+    //
+    //     Ok(())
+    // }
 
-    use crate::subscriber::SubscriberConfig;
-    use crate::subscription::{ReceiveConfig, SubscriptionConfig};
-
-    #[ctor::ctor]
-    fn init() {
-        let _ = tracing_subscriber::fmt().try_init();
-    }
-
-    fn create_message(data: &[u8], ordering_key: &str) -> PubsubMessage {
-        PubsubMessage {
-            data: data.to_vec(),
-            ordering_key: ordering_key.to_string(),
-            ..Default::default()
-        }
-    }
-
-    async fn create_client() -> Client {
-        std::env::set_var("PUBSUB_EMULATOR_HOST", "localhost:8681");
-        Client::default().await.unwrap()
-    }
-
-    async fn do_publish_and_subscribe(ordering_key: &str) -> Result<(), anyhow::Error> {
-        let client = create_client().await;
-
-        let order = !ordering_key.is_empty();
-        // create
-        let uuid = Uuid::new_v4().to_hyphenated().to_string();
-        let topic_id = &format!("t{}", &uuid);
-        let subscription_id = &format!("s{}", &uuid);
-        let ctx = Some(CancellationToken::new());
-        let topic = client
-            .create_topic(topic_id.as_str(), None, ctx.clone(), None)
-            .await
-            .unwrap();
-        let publisher = topic.new_publisher(None);
-        let config = SubscriptionConfig {
-            enable_message_ordering: !ordering_key.is_empty(),
-            ..Default::default()
-        };
-        let subscription = client
-            .create_subscription(subscription_id.as_str(), topic_id.as_str(), config, ctx.clone(), None)
-            .await
-            .unwrap();
-
-        let cancellation_token = CancellationToken::new();
-        //subscribe
-        let config = ReceiveConfig {
-            worker_count: 2,
-            subscriber_config: SubscriberConfig {
-                ping_interval: Duration::from_secs(1),
-                ..Default::default()
-            },
-        };
-        let cancel_receiver = cancellation_token.clone();
-        let (s, mut r) = tokio::sync::mpsc::channel(100);
-        let handle = tokio::spawn(async move {
-            let _ = subscription
-                .receive(
-                    move |v, _ctx| {
-                        let s2 = s.clone();
-                        async move {
-                            let _ = v.ack().await;
-                            let data = std::str::from_utf8(&v.message.data).unwrap().to_string();
-                            tracing::info!(
-                                "tid={:?} id={} data={}",
-                                thread::current().id(),
-                                v.message.message_id,
-                                data
-                            );
-                            let _ = s2.send(data).await;
-                        }
-                    },
-                    cancel_receiver,
-                    Some(config),
-                )
-                .await;
-        });
-
-        //publish
-        let mut awaiters = Vec::with_capacity(100);
-        for v in 0..100 {
-            let message = create_message(format!("abc_{}", v).as_bytes(), ordering_key);
-            awaiters.push(publisher.publish(message).await);
-        }
-        let ctx = CancellationToken::new();
-        for v in awaiters {
-            tracing::info!("sent message_id = {}", v.get(Some(ctx.clone())).await.unwrap());
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        cancellation_token.cancel();
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-
-        let mut count = 0;
-        while let Some(data) = r.recv().await {
-            tracing::debug!("{}", data);
-            if order {
-                assert_eq!(format!("abc_{}", count), data);
-            }
-            count += 1;
-        }
-        assert_eq!(count, 100);
-        let _ = handle.await;
-
-        let mut publisher = publisher;
-        publisher.shutdown().await;
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_publish_subscribe_ordered() -> Result<(), anyhow::Error> {
-        do_publish_and_subscribe("ordering").await
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_publish_subscribe_random() -> Result<(), anyhow::Error> {
-        do_publish_and_subscribe("").await
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_lifecycle() -> Result<(), anyhow::Error> {
-        let client = create_client().await;
-
-        let uuid = Uuid::new_v4().to_hyphenated().to_string();
-        let topic_id = &format!("t{}", &uuid);
-        let subscription_id = &format!("s{}", &uuid);
-        let ctx = Some(CancellationToken::new());
-        let topics = client.get_topics(ctx.clone(), None).await.unwrap();
-        let subs = client.get_subscriptions(ctx.clone(), None).await.unwrap();
-        let _topic = client
-            .create_topic(topic_id.as_str(), None, ctx.clone(), None)
-            .await
-            .unwrap();
-        let _subscription = client
-            .create_subscription(
-                subscription_id.as_str(),
-                topic_id.as_str(),
-                SubscriptionConfig::default(),
-                ctx.clone(),
-                None,
-            )
-            .await?;
-        let topics_after = client.get_topics(ctx.clone(), None).await.unwrap();
-        let subs_after = client.get_subscriptions(ctx.clone(), None).await.unwrap();
-        assert_eq!(1, topics_after.len() - topics.len());
-        assert_eq!(1, subs_after.len() - subs.len());
-        Ok(())
-    }
+    // #[tokio::test(flavor = "multi_thread")]
+    // #[serial]
+    // async fn test_publish_subscribe_ordered() -> Result<(), anyhow::Error> {
+    //     do_publish_and_subscribe("ordering").await
+    // }
+    //
+    // #[tokio::test(flavor = "multi_thread")]
+    // #[serial]
+    // async fn test_publish_subscribe_random() -> Result<(), anyhow::Error> {
+    //     do_publish_and_subscribe("").await
+    // }
+    //
+    // #[tokio::test(flavor = "multi_thread")]
+    // #[serial]
+    // async fn test_lifecycle() -> Result<(), anyhow::Error> {
+    //     let client = create_client().await;
+    //
+    //     let uuid = Uuid::new_v4().to_hyphenated().to_string();
+    //     let topic_id = &format!("t{}", &uuid);
+    //     let subscription_id = &format!("s{}", &uuid);
+    //     let ctx = Some(CancellationToken::new());
+    //     let topics = client.get_topics(ctx.clone(), None).await.unwrap();
+    //     let subs = client.get_subscriptions(ctx.clone(), None).await.unwrap();
+    //     let _topic = client
+    //         .create_topic(topic_id.as_str(), None, ctx.clone(), None)
+    //         .await
+    //         .unwrap();
+    //     let _subscription = client
+    //         .create_subscription(
+    //             subscription_id.as_str(),
+    //             topic_id.as_str(),
+    //             SubscriptionConfig::default(),
+    //             ctx.clone(),
+    //             None,
+    //         )
+    //         .await?;
+    //     let topics_after = client.get_topics(ctx.clone(), None).await.unwrap();
+    //     let subs_after = client.get_subscriptions(ctx.clone(), None).await.unwrap();
+    //     assert_eq!(1, topics_after.len() - topics.len());
+    //     assert_eq!(1, subs_after.len() - subs.len());
+    //     Ok(())
+    // }
 }

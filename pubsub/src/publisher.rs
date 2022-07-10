@@ -1,13 +1,11 @@
 use async_channel::{Receiver, TryRecvError};
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::select;
 use tokio::sync::Mutex;
 
 use google_cloud_gax::cancel::CancellationToken;
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use google_cloud_gax::grpc::Status;
@@ -16,11 +14,6 @@ use google_cloud_googleapis::pubsub::v1::{PublishRequest, PubsubMessage};
 
 use crate::apiv1::publisher_client::PublisherClient;
 use crate::util::ToUsize;
-
-pub(crate) struct ReservedMessage {
-    pub producer: oneshot::Sender<Result<String, Status>>,
-    pub message: PubsubMessage,
-}
 
 #[derive(Clone)]
 pub struct PublisherConfig {
@@ -44,30 +37,35 @@ impl Default for PublisherConfig {
     }
 }
 
-pub struct Awaiter {
-    consumer: oneshot::Receiver<Result<String, Status>>,
-}
+// pub struct Awaiter {
+//     consumer: oneshot::Receiver<Result<String, Status>>,
+// }
+//
+// impl Awaiter {
+//     pub(crate) fn new(consumer: oneshot::Receiver<Result<String, Status>>) -> Self {
+//         Self { consumer }
+//     }
+//     pub async fn get(self, cancel: Option<CancellationToken>) -> Result<String, Status> {
+//         let onetime = self.consumer;
+//         let awaited = match cancel {
+//             Some(cancel) => {
+//                 select! {
+//                     _ = cancel.cancelled() => return Err(Status::cancelled("cancelled")),
+//                     v = onetime => v
+//                 }
+//             }
+//             None => onetime.await,
+//         };
+//         match awaited {
+//             Ok(v) => v,
+//             Err(_e) => Err(Status::cancelled("closed")),
+//         }
+//     }
+// }
 
-impl Awaiter {
-    pub(crate) fn new(consumer: oneshot::Receiver<Result<String, Status>>) -> Self {
-        Self { consumer }
-    }
-    pub async fn get(self, cancel: Option<CancellationToken>) -> Result<String, Status> {
-        let onetime = self.consumer;
-        let awaited = match cancel {
-            Some(cancel) => {
-                select! {
-                    _ = cancel.cancelled() => return Err(Status::cancelled("cancelled")),
-                    v = onetime => v
-                }
-            }
-            None => onetime.await,
-        };
-        match awaited {
-            Ok(v) => v,
-            Err(_e) => Err(Status::cancelled("closed")),
-        }
-    }
+#[derive(Clone, Debug)]
+pub enum Error {
+    PublisherSenderClosed,
 }
 
 /// Publisher is a scheduler which is designed for Pub/Sub's Publish flow.
@@ -76,17 +74,22 @@ impl Awaiter {
 /// Items added to any other key are handled sequentially.
 #[derive(Clone, Debug)]
 pub struct Publisher {
-    ordering_senders: Arc<Vec<async_channel::Sender<ReservedMessage>>>,
-    sender: async_channel::Sender<ReservedMessage>,
+    ordering_senders: Arc<Vec<async_channel::Sender<PubsubMessage>>>,
+    sender: async_channel::Sender<PubsubMessage>,
     tasks: Arc<Mutex<Tasks>>,
     fqtn: String,
     pubc: PublisherClient,
 }
 
 impl Publisher {
-    pub(crate) fn new(fqtn: String, pubc: PublisherClient, config: Option<PublisherConfig>) -> Self {
+    pub(crate) fn new(
+        fqtn: String,
+        pubc: PublisherClient,
+        notifier: Arc<mpsc::Sender<Result<String, Status>>>,
+        config: Option<PublisherConfig>,
+    ) -> Self {
         let config = config.unwrap_or_default();
-        let (sender, receiver) = async_channel::unbounded::<ReservedMessage>();
+        let (sender, receiver) = async_channel::unbounded::<PubsubMessage>();
         let mut receivers = Vec::with_capacity(1 + config.workers);
         let mut ordering_senders = Vec::with_capacity(config.workers);
 
@@ -99,7 +102,7 @@ impl Publisher {
         // for ordering key message
         for _ in 0..config.workers {
             tracing::trace!("start ordering publisher : {}", fqtn.clone());
-            let (sender, receiver) = async_channel::unbounded::<ReservedMessage>();
+            let (sender, receiver) = async_channel::unbounded::<PubsubMessage>();
             receivers.push(receiver);
             ordering_senders.push(sender);
         }
@@ -107,7 +110,7 @@ impl Publisher {
         Self {
             sender,
             ordering_senders: Arc::new(ordering_senders),
-            tasks: Arc::new(Mutex::new(Tasks::new(fqtn.clone(), pubc.clone(), receivers, config))),
+            tasks: Arc::new(Mutex::new(Tasks::new(fqtn.clone(), pubc.clone(), receivers, notifier, config))),
             fqtn,
             pubc,
         }
@@ -133,29 +136,47 @@ impl Publisher {
             .map(|v| v.into_inner().message_ids)
     }
 
+    // /// publish publishes msg to the topic asynchronously. Messages are batched and
+    // /// sent according to the topic's PublisherConfig. Publish never blocks.
+    // ///
+    // /// publish returns a non-nil Awaiter which will be ready when the
+    // /// message has been sent (or has failed to be sent) to the server.
+    // pub async fn publish(&self, message: PubsubMessage) -> Awaiter {
+    //     if self.sender.is_closed() {
+    //         let (tx, rx) = tokio::sync::oneshot::channel();
+    //         drop(tx);
+    //         return Awaiter::new(rx);
+    //     }
+    //
+    //     let (producer, consumer) = oneshot::channel();
+    //     if message.ordering_key.is_empty() {
+    //         let _ = self.sender.send(ReservedMessage { producer, message }).await;
+    //     } else {
+    //         let key = message.ordering_key.as_str().to_usize();
+    //         let index = key % self.ordering_senders.len();
+    //         let _ = self.ordering_senders[index]
+    //             .send(ReservedMessage { producer, message })
+    //             .await;
+    //     }
+    //     Awaiter::new(consumer)
+    // }
+
     /// publish publishes msg to the topic asynchronously. Messages are batched and
     /// sent according to the topic's PublisherConfig. Publish never blocks.
-    ///
-    /// publish returns a non-nil Awaiter which will be ready when the
-    /// message has been sent (or has failed to be sent) to the server.
-    pub async fn publish(&self, message: PubsubMessage) -> Awaiter {
+    pub async fn publish(&self, message: PubsubMessage) -> Result<(), Error> {
         if self.sender.is_closed() {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            drop(tx);
-            return Awaiter::new(rx);
+            return Err(Error::PublisherSenderClosed);
         }
 
-        let (producer, consumer) = oneshot::channel();
         if message.ordering_key.is_empty() {
-            let _ = self.sender.send(ReservedMessage { producer, message }).await;
+            let _ = self.sender.send(message).await;
         } else {
             let key = message.ordering_key.as_str().to_usize();
             let index = key % self.ordering_senders.len();
-            let _ = self.ordering_senders[index]
-                .send(ReservedMessage { producer, message })
-                .await;
+            let _ = self.ordering_senders[index].send(message).await;
         }
-        Awaiter::new(consumer)
+
+        Ok(())
     }
 
     pub async fn shutdown(&mut self) {
@@ -176,7 +197,8 @@ impl Tasks {
     pub fn new(
         topic: String,
         pubc: PublisherClient,
-        receivers: Vec<async_channel::Receiver<ReservedMessage>>,
+        receivers: Vec<async_channel::Receiver<PubsubMessage>>,
+        notifier: Arc<mpsc::Sender<Result<String, Status>>>,
         config: PublisherConfig,
     ) -> Self {
         let tasks = receivers
@@ -184,6 +206,7 @@ impl Tasks {
             .map(|receiver| {
                 Self::run_task(
                     receiver,
+                    notifier.clone(),
                     pubc.clone(),
                     topic.clone(),
                     config.retry_setting.clone(),
@@ -197,7 +220,8 @@ impl Tasks {
     }
 
     fn run_task(
-        receiver: Receiver<ReservedMessage>,
+        receiver: Receiver<PubsubMessage>,
+        notifier: Arc<mpsc::Sender<Result<String, Status>>>,
         mut client: PublisherClient,
         topic: String,
         retry: Option<RetrySetting>,
@@ -206,18 +230,18 @@ impl Tasks {
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(flush_interval);
-            let mut bundle = VecDeque::<ReservedMessage>::new();
+            let mut bundle = Vec::<PubsubMessage>::new();
             while !receiver.is_closed() {
                 interval_timer.tick().await;
 
                 loop {
                     match receiver.try_recv() {
                         Ok(message) => {
-                            bundle.push_back(message);
+                            bundle.push(message);
                             if bundle.len() >= bundle_size {
                                 tracing::trace!("maximum buffer {} : {}", bundle.len(), topic);
-                                Self::flush(&mut client, topic.as_str(), &mut bundle, retry.clone()).await;
-                                debug_assert!(bundle.is_empty());
+                                Self::flush(&mut client, &notifier, topic.as_str(), bundle, retry.clone()).await;
+                                bundle = Vec::new();
                                 break;
                             }
                         }
@@ -225,8 +249,8 @@ impl Tasks {
                             TryRecvError::Empty => {
                                 if !bundle.is_empty() {
                                     tracing::trace!("elapsed: flush buffer : {}", topic);
-                                    Self::flush(&mut client, topic.as_str(), &mut bundle, retry.clone()).await;
-                                    debug_assert!(bundle.is_empty());
+                                    Self::flush(&mut client, &notifier, topic.as_str(), bundle, retry.clone()).await;
+                                    bundle = Vec::new();
                                 }
                                 break;
                             }
@@ -241,8 +265,7 @@ impl Tasks {
             tracing::trace!("stop publisher : {}", topic);
             if !bundle.is_empty() {
                 tracing::trace!("flush rest buffer : {}", topic);
-                Self::flush(&mut client, topic.as_str(), &mut bundle, retry.clone()).await;
-                debug_assert!(bundle.is_empty());
+                Self::flush(&mut client, &notifier, topic.as_str(), bundle, retry.clone()).await;
             }
         })
     }
@@ -250,21 +273,14 @@ impl Tasks {
     /// flush publishes the messages in buffer.
     async fn flush(
         client: &mut PublisherClient,
+        notifier: &Arc<mpsc::Sender<Result<String, Status>>>,
         topic: &str,
-        bundle: &mut VecDeque<ReservedMessage>,
+        messages: Vec<PubsubMessage>,
         retry_setting: Option<RetrySetting>,
     ) {
-        let mut data = Vec::<PubsubMessage>::with_capacity(bundle.len());
-        let mut callback = Vec::<oneshot::Sender<Result<String, Status>>>::with_capacity(bundle.len());
-
-        while let Some(r) = bundle.pop_front() {
-            data.push(r.message);
-            callback.push(r.producer);
-        }
-
         let req = PublishRequest {
             topic: topic.to_string(),
-            messages: data,
+            messages,
         };
         let result = client
             .publish(req, None, retry_setting)
@@ -274,20 +290,17 @@ impl Tasks {
         // notify to receivers
         match result {
             Ok(message_ids) => {
-                for (i, p) in callback.into_iter().enumerate() {
-                    let message_id = &message_ids[i];
-                    if p.send(Ok(message_id.to_string())).is_err() {
+                for message_id in message_ids {
+                    if notifier.send(Ok(message_id.to_string())).await.is_err() {
                         tracing::error!("failed to notify : id={message_id}");
                     }
                 }
             }
             Err(status) => {
-                for p in callback.into_iter() {
-                    let code = status.code();
-                    let status = Status::new(code, &(*status.message()).to_string());
-                    if p.send(Err(status)).is_err() {
-                        tracing::error!("failed to notify : status={}", code);
-                    }
+                let code = status.code();
+                let status = Status::new(code, &(*status.message()).to_string());
+                if notifier.send(Err(status)).await.is_err() {
+                    tracing::error!("failed to notify : status={}", code);
                 }
             }
         };
